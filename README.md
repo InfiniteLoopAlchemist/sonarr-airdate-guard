@@ -312,6 +312,32 @@ tail -f ~/sonarr-guard/sonarr-guard.log | grep '\[anime\]'
 
 There is no log rotation built in. Add a `logrotate` snippet if yours grows.
 
+## Knowing when v5 makes half of this redundant
+
+Sonarr does not announce release dates, so `tools/sonarr-v5-watch.py` watches for
+the artefact instead: a v5 tag or release on GitHub, or a v5 image on
+linuxserver's Docker Hub. It fires once when a prerelease appears and once when a
+stable build does, and says nothing in between.
+
+```bash
+python3 -c "import secrets,string; a=string.ascii_lowercase+string.digits; print('sonarr-v5-'+''.join(secrets.choice(a) for _ in range(16)))"
+export SONARR_V5_NTFY_TOPIC=sonarr-v5-...        # the topic it just printed
+python3 tools/sonarr-v5-watch.py --test          # confirm it reaches you
+python3 tools/sonarr-v5-watch.py --status        # what it can see right now
+```
+
+Then subscribe at `https://ntfy.sh/<your topic>` in a browser or the app, and run
+it from cron:
+
+```cron
+15 9 * * *  SONARR_V5_NTFY_TOPIC=... /usr/bin/python3 /path/to/sonarr-v5-watch.py --quiet
+```
+
+ntfy needs no account, so the random topic name is the only thing keeping it
+private. Point `SONARR_V5_NOTIFIARR_CONF` at a `notifiarr.conf` if you would
+rather it went to Discord, though that needs the passthrough integration enabled
+on notifiarr.com first.
+
 ## Documentation
 
 - [Configuration reference](docs/configuration.md), every option and what it does

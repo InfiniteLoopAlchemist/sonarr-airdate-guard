@@ -56,8 +56,28 @@ delete_blocklist = true
 # be. Some web releases legitimately land a few hours early in some regions.
 early_import_margin_hours = 24
 
-# unaired only. How far into the future to scan the calendar for early imports.
+# unaired only. How far into the future to scan the calendar for early imports,
+# and how far ahead to unmonitor.
 future_window_days = 400
+
+# --- monitoring (the part that actually prevents the problem) --------------
+
+# Unmonitor episodes that have not aired, and give the monitoring back once they
+# do. Without this, deleting an early file only cleans up after the fact: Sonarr
+# still sees a monitored episode with no file, searches again on the next RSS
+# sync, and grabs the same fake under a slightly different release name that the
+# blocklist does not match. Sonarr has no built-in option for this, so
+# unmonitoring is the only reliable lever.
+#
+# Only episodes this tool unmonitored are ever re-monitored. The ids are kept in
+# sonarr-guard-state.json next to this file. Run the poller with
+# --restore-monitoring before uninstalling, or those episodes stay unmonitored.
+unmonitor_unaired = true
+
+# Comma-separated Sonarr tag labels. Any series carrying one of these tags is
+# left completely alone by the monitoring pass. Use it for shows that
+# legitimately release ahead of their listed air date.
+ignore_tags =
 
 
 # ---------------------------------------------------------------------------

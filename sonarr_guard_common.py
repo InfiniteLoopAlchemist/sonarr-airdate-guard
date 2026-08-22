@@ -61,7 +61,8 @@ class Instance:
 
     def __init__(self, name, url, api_key, grace_days, mode, enabled,
                  delete_early_files, delete_scope, delete_blocklist,
-                 early_import_margin_hours, future_window_days):
+                 early_import_margin_hours, future_window_days,
+                 unmonitor_unaired, ignore_tags):
         self.name = name
         self.url = url.rstrip("/")
         self.api_key = api_key
@@ -73,6 +74,8 @@ class Instance:
         self.delete_blocklist = delete_blocklist
         self.early_import_margin_hours = early_import_margin_hours
         self.future_window_days = future_window_days
+        self.unmonitor_unaired = unmonitor_unaired
+        self.ignore_tags = ignore_tags
 
     def __repr__(self):
         return f"<Instance {self.name} {self.url} grace={self.grace_days}d mode={self.mode}>"
@@ -183,6 +186,8 @@ def load_instances(config_path=None):
             delete_blocklist=_truthy(section.get("delete_blocklist"), True),
             early_import_margin_hours=_number(section, "early_import_margin_hours", 24, name),
             future_window_days=_number(section, "future_window_days", 400, name, int),
+            unmonitor_unaired=_truthy(section.get("unmonitor_unaired"), True),
+            ignore_tags=[t.strip() for t in section.get("ignore_tags", "").split(",") if t.strip()],
         )
 
     if not instances:
@@ -336,26 +341,56 @@ def parse_air_date_list(raw):
 
 
 def remove_from_queue(instance, queue_id, blocklist=True, remove_from_client=True):
-    """Sonarr v4 uses 'blocklist'; older builds used 'blacklist'. Try the modern
-    spelling first and fall back."""
-    base_params = {
-        "removeFromClient": "true" if remove_from_client else "false",
-        "skipRedownload": "false",
-    }
+    """Returns (ok, detail).
 
+    Sonarr v4 uses 'blocklist', older builds used 'blacklist', so try the modern
+    spelling first and fall back.
+
+    A 404 counts as success. Fast usenet grabs can finish and import between the
+    queue being read and this call landing, and an item that is no longer in the
+    queue is the outcome we wanted anyway.
+
+    skipRedownload is always true. Sonarr's "Redownload Failed" setting is on by
+    default, so a plain blocklist makes it search for a replacement immediately.
+    For an unaired episode that replacement is just the next fake, which turns
+    blocklisting into an endless grab, block, search, grab loop.
+    """
+    attempts = []
     for key in ("blocklist", "blacklist"):
-        params = dict(base_params)
-        params[key] = "true" if blocklist else "false"
+        attempts.append({
+            "removeFromClient": "true" if remove_from_client else "false",
+            "skipRedownload": "true",
+            key: "true" if blocklist else "false",
+        })
+    if remove_from_client:
+        # The download client can refuse a removal that Sonarr itself would
+        # accept. Blocklisting still matters, so try again leaving the download
+        # where it is.
+        attempts.append({
+            "removeFromClient": "false",
+            "skipRedownload": "true",
+            "blocklist": "true" if blocklist else "false",
+        })
+
+    last = "no attempt made"
+    for index, params in enumerate(attempts):
         try:
             api_request(instance, f"/api/v3/queue/{queue_id}", method="DELETE", params=params)
+            if params["removeFromClient"] == "false" and remove_from_client:
+                return True, "left in the download client"
             return True, None
         except urllib.error.HTTPError as e:
-            if e.code == 400 and key == "blocklist":
+            if e.code == 404:
+                return True, "already left the queue"
+            last = f"HTTP {e.code}"
+            if e.code == 400 and index < len(attempts) - 1:
                 continue
-            return False, f"HTTP {e.code}"
+            if index < len(attempts) - 1:
+                continue
+            return False, last
         except (urllib.error.URLError, OSError) as e:
             return False, str(e)
-    return False, "server rejected both blocklist and blacklist parameters"
+    return False, last
 
 
 def delete_episode_file(instance, file_id):
@@ -398,6 +433,89 @@ def blocklist_episode_grab(instance, episode_id):
         return False, f"mark-failed failed: {e}"
 
 
+def set_episodes_monitored(instance, episode_ids, monitored, chunk=200):
+    """PUT /api/v3/episode/monitor. Returns (changed, error)."""
+    ids = [int(i) for i in episode_ids]
+    done = 0
+    for start in range(0, len(ids), chunk):
+        batch = ids[start:start + chunk]
+        try:
+            api_request(
+                instance, "/api/v3/episode/monitor", method="PUT",
+                payload={"episodeIds": batch, "monitored": bool(monitored)},
+                timeout=120,
+            )
+            done += len(batch)
+        except urllib.error.HTTPError as e:
+            return done, f"HTTP {e.code}"
+        except (urllib.error.URLError, OSError) as e:
+            return done, str(e)
+    return done, None
+
+
+def get_tag_ids(instance, names):
+    """Map tag labels to ids. Unknown labels are simply absent."""
+    wanted = {n.strip().lower() for n in names if n and n.strip()}
+    if not wanted:
+        return set()
+    try:
+        tags = api_request(instance, "/api/v3/tag") or []
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+        return set()
+    return {t["id"] for t in tags if str(t.get("label", "")).lower() in wanted}
+
+
+# --- state -----------------------------------------------------------------
+#
+# Records which episodes this tool unmonitored, so it only ever re-monitors its
+# own. The obvious alternative, re-monitoring every aired episode, cannot tell
+# our changes apart from ones the user made deliberately.
+
+STATE_PATH = os.environ.get(
+    "SONARR_GUARD_STATE", os.path.join(_SCRIPT_DIR, "sonarr-guard-state.json")
+)
+
+
+def load_state(path=None):
+    path = path or STATE_PATH
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "instances": {}}
+    if not isinstance(data, dict) or "instances" not in data:
+        return {"version": 1, "instances": {}}
+    return data
+
+
+def save_state(state, path=None):
+    """Write atomically, and merge anything that landed since we read, so a hook
+    firing mid-run cannot lose an entry."""
+    path = path or STATE_PATH
+    current = load_state(path)
+    for name, episodes in current.get("instances", {}).items():
+        merged = dict(episodes)
+        merged.update(state.get("instances", {}).get(name, {}))
+        # Anything this run deliberately dropped stays dropped.
+        for key in state.get("_removed", {}).get(name, []):
+            merged.pop(key, None)
+        state.setdefault("instances", {})[name] = merged
+    state.pop("_removed", None)
+
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=1, sort_keys=True)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
 def resolve_instance(instances, requested, source_hint=""):
     """Pick an instance by name, case-insensitively. If none requested and only
     one is configured, use it."""
@@ -434,8 +552,9 @@ if __name__ == "__main__":
         inst = instances[name]
         state = "enabled" if inst.enabled else "DISABLED"
         delete = f"{inst.delete_scope}" if inst.delete_early_files else "off"
+        guard = "unmonitor" if inst.unmonitor_unaired else "no-unmonitor"
         log(f"  {name}: {inst.url} grace={inst.grace_days}d mode={inst.mode} "
-            f"delete={delete} [{state}]")
+            f"delete={delete} {guard} [{state}]")
         if not inst.enabled:
             continue
         try:

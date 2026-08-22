@@ -11,9 +11,10 @@
 #   4. bind-mounts the guard directory into every Sonarr container at /guard
 #   5. recreates only the containers whose compose file actually changed
 #   6. installs the cron entries
+#   7. creates the Custom Script connection on each instance over the API
 #
-# It never overwrites an existing config, and it never touches the Custom Script
-# connections. Those are a few clicks in the Sonarr UI, printed at the end.
+# It never overwrites an existing config. There is nothing to click in the
+# Sonarr UI afterwards.
 #
 # Environment:
 #   SONARR_GUARD_DIR   where to install (default: reuse an existing /guard mount,
@@ -80,6 +81,7 @@ for f in sonarr_guard_common.py sonarr-airdate-guard.py sonarr-grab-hook.sh; do
 done
 run mkdir -p "$GUARD_DIR/lib"
 run install -m 755 "$STAGE/lib/patch-compose.py" "$GUARD_DIR/lib/patch-compose.py"
+run install -m 755 "$STAGE/lib/setup-connections.py" "$GUARD_DIR/lib/setup-connections.py"
 
 run touch "$GUARD_DIR/sonarr-guard.log"
 run chmod 664 "$GUARD_DIR/sonarr-guard.log"
@@ -262,6 +264,9 @@ fi
 step "config check"
 python3 "$GUARD_DIR/sonarr_guard_common.py" || true
 
+step "wiring the Custom Script connection into each Sonarr"
+python3 "$GUARD_DIR/lib/setup-connections.py" || true
+
 step "guard directory visible inside each container"
 for c in "${CONTAINERS[@]}"; do
     printf '    %-22s ' "$c"
@@ -274,22 +279,25 @@ done
 
 cat <<NOTE
 
-==> last step, in each Sonarr UI
-
-  Settings > Connect > + > Custom Script
-
-      Name:       Air Date Guard
-      On Grab:    on
-      On Import:  on
-      everything else: off
-      Path:       /guard/sonarr-grab-hook.sh
-      Arguments:  the section name printed above for that container
-
-  Saving fires a Test and the hook reports which section it bound to, so a typo
-  in Arguments fails right there instead of at 3am.
-
-==> before you let it delete anything, look at what it would do
+==> before you let it loose, look at what it would do
 
       python3 $GUARD_DIR/sonarr-airdate-guard.py --dry-run
+
+  That reports every queue item it would remove, every file it would delete, and
+  every episode it would unmonitor, and changes nothing.
+
+==> the connections are already set up
+
+  Nothing to click. The Custom Script connection was created on each instance by
+  the step above. Sonarr 4.0.19 dropped support for the Arguments field, so the
+  hook identifies which instance it belongs to on its own.
+
+==> if you ever uninstall
+
+      python3 $GUARD_DIR/sonarr-airdate-guard.py --restore-monitoring
+      python3 $GUARD_DIR/lib/setup-connections.py --remove
+
+  The first gives back the monitoring on every episode this tool unmonitored.
+  Skip it and those episodes stay unmonitored forever.
 
 NOTE

@@ -6,8 +6,8 @@ Everything lands in `<guard dir>/sonarr-guard.log`. Start there.
 tail -f ~/sonarr-guard/sonarr-guard.log
 ```
 
-`[hook]` lines come from inside a container, `[poll]` from the host cron job. The
-second tag is the instance section name.
+`[hook]` lines come from inside a container, `[poll]` from the host cron job,
+`[connect]` from the connection installer. The second tag is the instance.
 
 ## Check the basics first
 
@@ -19,9 +19,9 @@ Pings every instance and prints its Sonarr version:
 
 ```
 Config OK: /home/you/sonarr-guard/sonarr-guard.conf
-  main: http://127.0.0.1:8989 grace=3.0d mode=strict delete=unaired [enabled]
+  main: http://127.0.0.1:8989 grace=3.0d mode=strict delete=unaired unmonitor [enabled]
     reachable, Sonarr 4.0.19.2979
-  anime: http://127.0.0.1:9779 grace=5.0d mode=lenient delete=unaired [enabled]
+  anime: http://127.0.0.1:9779 grace=5.0d mode=lenient delete=unaired unmonitor [enabled]
     reachable, Sonarr 4.0.19.2979
 ```
 
@@ -34,22 +34,27 @@ Config OK: /home/you/sonarr-guard/sonarr-guard.conf
 
 ## Testing the hook without waiting for a real grab
 
-The hook is an ordinary script, so you can drive it directly with a synthetic
-event. Replace `sonarr` with your container name and `main` with your section.
+The hook is an ordinary script, so you can drive it with a synthetic event.
+Replace `sonarr` with your container name. You do not pass a section name; the
+hook works out which instance it is.
 
-**Does it load at all?**
+**Does it load, and which section did it match?**
 
 ```bash
-docker exec -e sonarr_eventtype=Test sonarr /guard/sonarr-grab-hook.sh main
+docker exec -e sonarr_eventtype=Test sonarr /guard/sonarr-grab-hook.sh
 ```
 
 ```
-Test OK. Bound to [main] on http://127.0.0.1:8989 (Sonarr 4.0.19.2979),
+Test OK. Matched [main] by api key, on http://127.0.0.1:8989 (Sonarr 4.0.19.2979),
 grace 3d, mode strict, delete_early_files=true
 ```
 
-**Does it reject an unaired release?** This one has no download id, so it reports
-the decision and stops before touching anything.
+`by api key` is the healthy answer. `by port` means the key in your config no
+longer matches the container's, which will also be breaking the poller.
+
+**Does it reject an unaired release?** This one has no download id and a title
+that is not in the queue, so it reports its decision, spends its 45 second budget
+looking, and stops without touching anything.
 
 ```bash
 docker exec \
@@ -59,16 +64,16 @@ docker exec \
   -e sonarr_release_episodenumbers=12 \
   -e sonarr_release_title="Fake.Show.S21E12.1080p.WEB-DL" \
   -e sonarr_release_episodeairdatesutc="$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ)" \
-  sonarr /guard/sonarr-grab-hook.sh main
+  sonarr /guard/sonarr-grab-hook.sh
 ```
 
 ```
-EARLY Fake Show S21E12 | air date 2026-09-21 | clears in 33d 0h | Fake.Show.S21E12.1080p.WEB-DL
-  -> no download id in payload, leaving it for the poller
+EARLY Fake Show S21E12 | air date 2026-09-21 | clears in 32d 23h | Fake.Show.S21E12.1080p.WEB-DL
+  -> not in the queue within 45s, most likely already imported. The import hook covers it.
 ```
 
-**Does it allow an aired one?** Swap the date for `'-30 days'` and you should get
-`ALLOW ... grace cleared`.
+**Does it allow an aired one?** Swap the date for `'-30 days'` and you get
+`ALLOW ... grace cleared`, immediately.
 
 **Does `strict` versus `lenient` behave?** Pass two dates, one past and one
 future. A `strict` instance reports `EARLY`, a `lenient` one reports `ALLOW`.
@@ -87,7 +92,7 @@ docker exec \
   -e sonarr_episodefile_episodenumbers=12 \
   -e sonarr_episodefile_relativepath="Season 21/Fake.Show.S21E12.mkv" \
   -e sonarr_episodefile_episodeairdatesutc="$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ)" \
-  sonarr /guard/sonarr-grab-hook.sh main
+  sonarr /guard/sonarr-grab-hook.sh
 ```
 
 Never put a real `sonarr_episodefile_id` in a test. That is the id the script
@@ -97,28 +102,31 @@ deletes.
 
 **Nothing at all in the log for `[hook]`.**
 
-Check the connection actually saved with On Grab and On Import ticked. Then check
-the path is `/guard/sonarr-grab-hook.sh`, which is the path **inside** the
-container, not the host path.
+Check the connection exists and is bound to the right events:
+
+```bash
+python3 ~/sonarr-guard/lib/setup-connections.py
+```
+
+That is idempotent. It reports `already correct`, or repairs the connection.
+
+Then check the script is visible inside the container. The path in the connection
+is `/guard/sonarr-grab-hook.sh`, which is the path **inside** the container, not
+the host path.
 
 ```bash
 docker exec sonarr test -x /guard/sonarr-grab-hook.sh && echo ok
-```
-
-If that fails, the mount is missing. Confirm it:
-
-```bash
 docker inspect sonarr --format '{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}'
 ```
 
-If `/guard` is not there, the compose patch did not apply or the container was
-never recreated. Re-run `./install.sh`.
+If `/guard` is not in that list, the compose patch did not apply or the container
+was never recreated. Re-run `./install.sh`.
 
-**`ERROR: no section [xyz] in /guard/sonarr-guard.conf`**
+**`ERROR: cannot tell which instance this is`**
 
-The Arguments field does not match a section name. The message lists the valid
-ones. Matching is case insensitive but nothing else is normalised, so a trailing
-space will do it.
+No config section has this container's key or port. Either the config was written
+for a different set of containers, or you regenerated the key in the Sonarr UI.
+Fix the `api_key` in the config, or delete the config and re-run `./install.sh`.
 
 **`ERROR: cannot read /guard/sonarr-guard.conf`**
 
@@ -133,15 +141,58 @@ docker exec sonarr id
 
 **`ERROR: could not read the key and port`**
 
-Sonarr's own `/config/config.xml` is not where the hook expects. If your image
-uses a different config path, set `SONARR_CONFIG_XML` in that container's
-environment.
+Sonarr's `/config/config.xml` is not where the hook expects. If your image uses a
+different config path, set `SONARR_CONFIG_XML` in that container's environment.
+
+**"Arguments are no longer supported for custom scripts"**
+
+Sonarr 4.0.19 and later refuse any value in the Arguments field. That is expected
+and nothing needs to go there. If you added one by hand in the UI, clear it.
+
+## Sonarr keeps grabbing the same fake over and over
+
+This is the failure mode that matters, and it has three separate causes.
+
+**1. The monitoring pass is off.** Check:
+
+```bash
+python3 ~/sonarr-guard/sonarr_guard_common.py
+```
+
+If an instance shows `no-unmonitor`, set `unmonitor_unaired = true` for it.
+Without that pass, Sonarr keeps searching for unaired episodes and you are only
+ever cleaning up afterwards.
+
+**2. The episodes are still monitored.** Confirm directly:
+
+```bash
+python3 ~/sonarr-guard/sonarr-airdate-guard.py -i animation --dry-run
+```
+
+`Monitoring: would unmonitor N unaired episode(s)` means the pass has not run yet
+for them. Drop `--dry-run`.
+
+If it says `nothing unaired left to unmonitor` but Sonarr is still grabbing, the
+episode may be outside `future_window_days`, or its series carries one of your
+`ignore_tags`.
+
+**3. Something is triggering redownloads.** Sonarr's **Redownload Failed**
+setting, on by default under Settings > Indexers, makes it search for a
+replacement every time a release is marked failed. This tool always passes
+`skipRedownload=true` on queue removals for exactly that reason, so if you see a
+loop, check that you are not running an old copy:
+
+```bash
+grep -c 'skipRedownload=true' ~/sonarr-guard/sonarr-grab-hook.sh   # expect 4
+```
+
+If that returns 0, re-run `./install.sh` to update the deployed scripts.
 
 ## Something got deleted that should not have
 
-Check whether Sonarr's recycle bin has it, under
-**Settings > Media Management > Recycle Bin**. If that was configured, the file is
-still there, because deletion goes through Sonarr's API rather than `rm`.
+Check whether Sonarr's recycle bin has it, under **Settings > Media Management >
+Recycle Bin**. If that was configured, the file is still there, because deletion
+goes through Sonarr's API rather than `rm`.
 
 Then work out why. The log line names the air date the decision was based on:
 
@@ -150,39 +201,46 @@ EARLY FILE Futurama S11E05 | air date 2026-08-24 | has not aired yet | 781.4MB |
 ```
 
 If that air date is wrong, the problem is metadata, not the guard. Refresh the
-series in Sonarr, and check the show on TVDB. Shows that drop a whole season at
-once but are listed with weekly air dates are the usual culprit.
+series in Sonarr and check it on TVDB. Shows that drop a whole season at once but
+are listed with weekly air dates are the usual culprit.
 
-To stop it happening again while you sort the metadata out:
+To stop it happening again while you sort the metadata out, tag the series in
+Sonarr and add that tag to `ignore_tags`, or:
 
 ```bash
 python3 sonarr-airdate-guard.py --exclude-series "That Show"
 ```
 
-Or set `delete_early_files = false` in that instance's section, which leaves the
-queue guard running but stops it touching the library.
-
 Always `--dry-run` first when changing anything about deletion.
 
-## Sonarr keeps re-grabbing the same fake
+## An episode never came back after it aired
 
-Blocklisting is not working. The log will say:
+The re-monitor happens on the first poller run after the air time passes, so with
+the hourly cron it can take up to an hour.
 
+Check what the tool is tracking:
+
+```bash
+python3 -c "
+import json; d = json.load(open('$HOME/sonarr-guard/sonarr-guard-state.json'))
+for k, v in d['instances'].items(): print(k, len(v), 'tracked')
+"
 ```
-  -> not blocklisted (no grab found in history), Sonarr may grab it again
+
+If the state file was lost, the episodes it recorded stay unmonitored and nothing
+will restore them automatically, because the tool deliberately will not re-monitor
+episodes it has no record of touching. Re-monitor those by hand in the Sonarr UI.
+
+To hand everything back at once:
+
+```bash
+python3 ~/sonarr-guard/sonarr-airdate-guard.py --restore-monitoring
 ```
-
-That happens when the file was manually imported, so there is no grab record to
-mark as failed. Add the release to the blocklist by hand from
-**Activity > History**, or from the series' interactive search.
-
-If you passed `--no-blocklist`, that is the cause. Do not use that flag routinely;
-without it you get a grab, remove, grab, remove loop that hammers your indexer.
 
 ## The deep sweep takes forever
 
-`imported_early` makes one API call per series. On a large library that is minutes,
-which is why it is a weekly cron entry and not the hourly one. Narrow it:
+`imported_early` makes one API call per series. On a large library that is
+minutes, which is why it is a weekly cron entry. Narrow it:
 
 ```bash
 python3 sonarr-airdate-guard.py --files-only --scope imported_early -i anime
@@ -196,17 +254,20 @@ crontab -l | grep sonarr-airdate-guard
 
 Cron runs with a minimal environment and no shell profile, which is why the
 installed entries use absolute paths for both `python3` and the script. If you
-hand-edited them, put the absolute paths back.
-
-Test the exact command from the crontab by hand before assuming cron is at fault.
+hand-edited them, put the absolute paths back. Test the exact command from the
+crontab by hand before assuming cron is at fault.
 
 ## Starting completely over
 
+Give the monitoring back first, or every unaired episode stays unmonitored:
+
 ```bash
+python3 ~/sonarr-guard/sonarr-airdate-guard.py --restore-monitoring
+python3 ~/sonarr-guard/lib/setup-connections.py --remove
 crontab -l | grep -v sonarr-airdate-guard.py | crontab -
 rm -rf ~/sonarr-guard
 ```
 
-Then remove the `- ...:/guard` line from each compose file, `docker compose up -d`
-each project, and delete the Custom Script connections in each Sonarr UI. Every
-compose file the installer touched has a timestamped `.bak` beside it.
+Then remove the `- ...:/guard` line from each compose file and
+`docker compose up -d` each project. Every compose file the installer touched has
+a timestamped `.bak` beside it.

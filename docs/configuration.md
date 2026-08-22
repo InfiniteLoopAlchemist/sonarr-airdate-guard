@@ -23,9 +23,18 @@ grace_days = 5      ; this instance only
 mode = lenient      ; this instance only
 ```
 
-The section name is the instance's identity. It goes in the Arguments field of
-that instance's Custom Script connection, and it is what `-i` accepts on the
-poller. Matching is case insensitive.
+The section name is the instance's identity, and what `-i` accepts on the poller.
+Matching is case insensitive.
+
+You do not have to tell the hook which section it is. Sonarr 4.0.19 removed the
+Arguments field from custom scripts, so the hook reads its own key and port out
+of `/config/config.xml` and finds the matching section itself, in this order:
+
+1. an explicit argument, on older Sonarr builds that still allow one
+2. the section whose `api_key` matches this container's
+3. the section whose `url` ends in this container's port
+4. Sonarr's own instance name, if it matches a section name
+5. the only section, if just one is configured
 
 ## Connection
 
@@ -43,13 +52,12 @@ The in-container hook ignores this entirely. It builds its own URL from
 
 ### `api_key`
 
-Used by the poller only. The installer reads it out of the container's
+Read by the poller to talk to the instance, and used by the hook to work out
+which section describes it. The installer fills it in from the container's
 `config.xml`.
 
-The hook reads the key from `/config/config.xml` at run time instead, which means
-regenerating the key in the Sonarr UI cannot desync the hook. It can desync the
-poller, so re-run `install.sh` after deleting the config, or edit the value by
-hand.
+If you regenerate a key in the Sonarr UI, update it here too. The poller will
+start returning 401, and the hook will fall back to matching on port.
 
 ### `enabled`
 
@@ -148,22 +156,74 @@ Default `true`. After deleting a file, find the grab that produced it in Sonarr'
 history and mark it failed, which is the only way to get a release onto Sonarr's
 blocklist.
 
-Leaving this off means Sonarr sees a missing episode, searches, finds the same
-fake, and grabs it again. The guard deletes it again. That loop hammers your
-indexer, so keep it on unless you have a specific reason.
+It stops that exact release coming back, which is worth having, but do not
+mistake it for the protection. Blocklists match release names, and the same fake
+returns moments later under a slightly different one. `unmonitor_unaired` is what
+actually stops the grabbing.
+
+Note that Sonarr's **Redownload Failed** setting, on by default, makes marking a
+release failed trigger an immediate search for a replacement. Every queue removal
+this tool makes therefore passes `skipRedownload=true`, because a replacement for
+an unaired episode is just the next fake. Without that flag, blocklisting builds
+an endless grab, block, search, grab loop.
 
 If no grab record can be found, for example on a file that was manually imported,
 the deletion still happens and the log says the release was not blocklisted.
 
-## Grace does not apply to deletion
+
+
+## Monitoring
+
+The pass that prevents the problem rather than cleaning up after it. See
+[how it works](how-it-works.md) for why deleting and blocklisting alone cannot
+succeed.
+
+### `unmonitor_unaired`
+
+Default `true`. Unmonitor every episode that has not aired, and re-monitor it
+once it has.
+
+Sonarr will not search for an unmonitored episode, so the fakes stop being
+grabbed at all. Without this the guard is stuck cleaning up the same episodes
+forever, because Sonarr keeps searching for anything monitored and missing, and
+the blocklist cannot keep up with the supply of release names.
+
+Every episode this tool unmonitors is recorded in `sonarr-guard-state.json`,
+next to the config. Only ids in that file are ever re-monitored, so an episode
+you unmonitored yourself is never silently switched back on.
+
+The window is `future_window_days` ahead, and the re-monitor happens on the first
+run after the air time passes, so with the default hourly cron an episode is
+monitored again within an hour of airing.
+
+**Before uninstalling, run `--restore-monitoring`.** Delete the state file or the
+scripts without doing that and every unaired episode stays unmonitored, silently,
+forever.
+
+### `ignore_tags`
+
+Comma-separated Sonarr tag labels. Any series carrying one of these tags is left
+completely alone by the monitoring pass.
+
+```ini
+ignore_tags = early, live-sport
+```
+
+Use it for shows that legitimately publish ahead of their listed air date, where
+you would rather have the early release than the protection. Tag the series in
+Sonarr, and this tool stops touching its monitoring.
+
+`--exclude-series` does the same thing by title for a single run.
+
+## Grace does not apply to deletion or monitoring
 
 Worth stating plainly, because it surprises people.
 
-`grace_days` is used by the queue guard and nothing else. File deletion uses the
-raw air time.
+`grace_days` is used by the queue guard and nothing else. File deletion and
+unmonitoring both use the raw air time.
 
 The reasoning: blocking a download is cheap and reversible, so it is fine to be
-cautious and block for a few days after air. Deleting a file is neither, so it
-only happens in the case that admits no doubt, which is an episode that has not
-aired. A file for an episode that aired two hours ago is left alone, whatever
+cautious and block for a few days after air. Deleting a file is not, so it only
+happens in the case that admits no doubt, which is an episode that has not aired.
+A file for an episode that aired two hours ago is left alone, whatever
 `grace_days` says.

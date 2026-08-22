@@ -4,7 +4,7 @@ sonarr-airdate-guard.py
 
 Runs on the Docker host, against every Sonarr instance in sonarr-guard.conf.
 
-Two passes per instance:
+Three passes per instance:
 
   1. QUEUE   remove and blocklist downloads for episodes that have not aired
              yet, plus a grace period. Backstop for the On Grab hook, which
@@ -19,6 +19,14 @@ Two passes per instance:
                               more than early_import_margin_hours, even if the
                               episode has since aired. One call per series.
 
+  3. MONITOR unmonitor episodes that have not aired, and give the monitoring
+             back once they do. This is the pass that stops the problem rather
+             than cleaning up after it. Sonarr has no built-in option to skip
+             unaired episodes, so without this it keeps searching, keeps
+             grabbing the same fake under slightly different release names that
+             the blocklist does not match, and the guard keeps deleting it.
+             Only episodes this tool unmonitored are ever re-monitored.
+
 Grace does not apply to the file pass. A file for an episode that aired two
 hours ago may well be legitimate; a file for an episode that has not aired
 cannot be. The delete pass only touches the unambiguous cases.
@@ -30,6 +38,7 @@ Usage:
     python3 sonarr-airdate-guard.py --scope imported_early --dry-run
     python3 sonarr-airdate-guard.py --queue-only         # skip the file pass
     python3 sonarr-airdate-guard.py --files-only         # skip the queue pass
+    python3 sonarr-airdate-guard.py --restore-monitoring # undo every unmonitor
 
 Requires only the Python 3 standard library.
 """
@@ -50,11 +59,15 @@ from sonarr_guard_common import (  # noqa: E402
     get_episodes_with_files,
     get_queue,
     get_series,
+    get_tag_ids,
     init_log,
     load_instances,
+    load_state,
     log,
     parse_air_date,
     remove_from_queue,
+    save_state,
+    set_episodes_monitored,
 )
 
 
@@ -66,6 +79,8 @@ class Tally:
         self.files_flagged = 0
         self.files_deleted = 0
         self.bytes_freed = 0
+        self.unmonitored = 0
+        self.remonitored = 0
         self.failed = 0
 
     def merge(self, other):
@@ -159,7 +174,8 @@ def guard_queue(instance, args, now, excluded, tally):
         )
         if ok:
             tally.removed += 1
-            log(f"  -> removed from queue (blocklist={not args.no_blocklist})", instance)
+            detail = f", {err}" if err else ""
+            log(f"  -> removed from queue (blocklist={not args.no_blocklist}){detail}", instance)
         else:
             tally.failed += 1
             log(f"  -> removal failed: {err}", instance)
@@ -299,6 +315,119 @@ def cleanup_files(instance, args, now, excluded, tally):
 
 
 # --------------------------------------------------------------------------
+# pass 3: monitoring
+#
+# This is the pass that actually stops the bleeding. Deleting an early file only
+# cleans up after the fact: Sonarr still sees a monitored episode with no file,
+# searches on the next RSS sync, and grabs the same fake again, often under a
+# slightly different release name that the blocklist does not match. Sonarr has
+# no built-in "do not grab unaired episodes" option, so the only reliable lever
+# is to unmonitor an episode until it has actually aired.
+#
+# Every episode we unmonitor is recorded, and only those are ever re-monitored.
+# Re-monitoring every aired episode instead, which is what the well-known
+# swurApp does, cannot tell our changes apart from the user's own.
+# --------------------------------------------------------------------------
+
+def manage_monitoring(instance, args, now, excluded, tally):
+    state = load_state()
+    tracked = dict(state.get("instances", {}).get(instance.name, {}))
+    dropped = []
+
+    # 1. give back anything of ours whose air time has passed
+    if args.restore_monitoring:
+        due = list(tracked)
+        label = "restore"
+    else:
+        due = []
+        for episode_id, air_raw in tracked.items():
+            air = parse_air_date(air_raw)
+            if air is None or now >= air:
+                due.append(episode_id)
+        label = "aired"
+
+    if due:
+        if args.dry_run:
+            log(f"Monitoring: would re-monitor {len(due)} episode(s) ({label})", instance)
+        else:
+            done, err = set_episodes_monitored(instance, due, True)
+            if err:
+                log(f"Monitoring: re-monitor failed after {done}: {err}", instance)
+                tally.failed += 1
+            else:
+                log(f"Monitoring: re-monitored {done} episode(s) ({label})", instance)
+            for episode_id in due[:done]:
+                tracked.pop(episode_id, None)
+                dropped.append(episode_id)
+            tally.remonitored += done
+
+    if args.restore_monitoring:
+        if not args.dry_run:
+            state.setdefault("instances", {})[instance.name] = tracked
+            state.setdefault("_removed", {})[instance.name] = dropped
+            save_state(state)
+        return
+
+    if not instance.unmonitor_unaired or args.no_unmonitor:
+        log("Monitoring: unmonitor pass disabled", instance)
+        return
+
+    # 2. take away anything that has not aired
+    ignore_ids = get_tag_ids(instance, instance.ignore_tags)
+    try:
+        records = get_calendar(
+            instance, now, now + timedelta(days=instance.future_window_days)
+        )
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+        log(f"Monitoring: calendar scan failed: {e}", instance)
+        tally.failed += 1
+        return
+
+    fresh = {}
+    skipped_tag = 0
+    for episode in records:
+        if not episode.get("monitored"):
+            continue
+        air_utc = parse_air_date(episode.get("airDateUtc"))
+        if air_utc is None or now >= air_utc:
+            continue
+
+        series = episode.get("series") or {}
+        if series.get("title", "").lower() in excluded:
+            continue
+        if ignore_ids and set(series.get("tags") or []) & ignore_ids:
+            skipped_tag += 1
+            continue
+
+        fresh[str(episode["id"])] = episode.get("airDateUtc")
+
+    if skipped_tag:
+        log(f"Monitoring: left {skipped_tag} episode(s) alone, series carries an ignore tag",
+            instance)
+
+    if not fresh:
+        log("Monitoring: nothing unaired left to unmonitor", instance)
+    elif args.dry_run:
+        log(f"Monitoring: would unmonitor {len(fresh)} unaired episode(s)", instance)
+    else:
+        done, err = set_episodes_monitored(instance, list(fresh), False)
+        if err:
+            log(f"Monitoring: unmonitor failed after {done}: {err}", instance)
+            tally.failed += 1
+        else:
+            log(f"Monitoring: unmonitored {done} unaired episode(s), "
+                "Sonarr will stop searching for them until they air", instance)
+        for episode_id in list(fresh)[:done]:
+            tracked[episode_id] = fresh[episode_id]
+        tally.unmonitored += done
+
+    if not args.dry_run:
+        state.setdefault("instances", {})[instance.name] = tracked
+        state.setdefault("_removed", {})[instance.name] = dropped
+        save_state(state)
+
+
+# --------------------------------------------------------------------------
 
 def process_instance(instance, args):
     tally = Tally()
@@ -308,6 +437,10 @@ def process_instance(instance, args):
 
     now = datetime.now(timezone.utc)
     excluded = {s.strip().lower() for s in args.exclude_series.split(",") if s.strip()}
+
+    if args.restore_monitoring:
+        manage_monitoring(instance, args, now, excluded, tally)
+        return tally
 
     if not args.files_only:
         guard_queue(instance, args, now, excluded, tally)
@@ -319,6 +452,9 @@ def process_instance(instance, args):
         return tally
 
     cleanup_files(instance, args, now, excluded, tally)
+
+    if not args.files_only:
+        manage_monitoring(instance, args, now, excluded, tally)
     return tally
 
 
@@ -343,6 +479,15 @@ def main():
     parser.add_argument("--queue-only", action="store_true", help="Skip the file delete pass.")
     parser.add_argument("--files-only", action="store_true", help="Skip the queue pass.")
     parser.add_argument("--no-delete", action="store_true", help="Never delete files on disk.")
+    parser.add_argument(
+        "--no-unmonitor", action="store_true",
+        help="Skip the monitoring pass. Sonarr will keep searching for unaired episodes.",
+    )
+    parser.add_argument(
+        "--restore-monitoring", action="store_true",
+        help="Re-monitor every episode this tool ever unmonitored and forget them. "
+             "Use this before uninstalling.",
+    )
     parser.add_argument(
         "--no-blocklist", action="store_true",
         help="Remove and delete without blocklisting. Warning: Sonarr will usually "
@@ -397,6 +542,7 @@ def main():
             f"Done. Queue: checked {totals.checked}, flagged {totals.flagged}, "
             f"removed {totals.removed}. Files: flagged {totals.files_flagged}, "
             f"deleted {totals.files_deleted} ({human_size(totals.bytes_freed)} freed). "
+            f"Monitoring: unmonitored {totals.unmonitored}, re-monitored {totals.remonitored}. "
             f"Failures: {totals.failed}."
         )
 

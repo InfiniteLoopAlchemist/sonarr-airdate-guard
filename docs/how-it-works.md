@@ -5,11 +5,13 @@
 ```
 <guard dir>/
   sonarr-guard.conf          the single source of truth for every instance
+  sonarr-guard-state.json    ids of every episode this tool unmonitored
   sonarr-guard.log           one log, host and containers both append to it
   sonarr_guard_common.py     config, logging, Sonarr API (host)
   sonarr-airdate-guard.py    the cron poller (host)
   sonarr-grab-hook.sh        the Custom Script (runs inside every container)
   lib/patch-compose.py       installer helper
+  lib/setup-connections.py   creates the Custom Script connections over the API
 ```
 
 The same directory is bind-mounted into every Sonarr container at `/guard`. One
@@ -41,16 +43,20 @@ Bound to two events.
 Sonarr fires this the moment it sends a release to your download client, before
 any of it has transferred.
 
-1. Read the section name from the connection's Arguments field.
-2. Read `grace_days`, `mode`, and `enabled` from the shared config.
-3. Read this instance's own key and port from `/config/config.xml`.
+1. Read this instance's own key and port from `/config/config.xml`.
+2. Work out which config section that is (see "Self-identification" below).
+3. Read `grace_days`, `mode`, and `enabled` from the shared config.
 4. Parse `sonarr_release_episodeairdatesutc`, which is a comma-separated list of
    the UTC air times of every episode the release covers.
 5. Pick the reference date: the **latest** under `strict`, the **earliest** under
    `lenient`.
 6. If `now >= reference + grace_days`, log `ALLOW` and exit.
-7. Otherwise log `EARLY`, then find the queue item by `sonarr_download_id` and
-   delete it with `blocklist=true` and `removeFromClient=true`.
+7. Otherwise log `EARLY`, then find the queue item and delete it with
+   `blocklist=true`, `removeFromClient=true`, and `skipRedownload=true`.
+
+The queue item is matched on `sonarr_download_id`, compared case insensitively
+because download clients differ on hex casing, falling back to the release
+title.
 
 Step 7 exists because Sonarr gives a script no way to veto a grab. The release is
 already on its way to the download client, so the hook removes it immediately
@@ -77,6 +83,21 @@ library.
 This is the same job the poller's file pass does, but immediately rather than up
 to an hour later.
 
+### Self-identification
+
+Sonarr 4.0.19 removed the Arguments field from custom scripts. Sending any value
+now fails validation with *"Arguments are no longer supported for custom
+scripts"*, so a hook cannot be told which instance it belongs to.
+
+It works it out instead. `/config/config.xml` inside the container holds that
+instance's key, port, and URL base, which is enough to both talk to Sonarr and
+find the matching config section. The order is: explicit argument if one was
+somehow passed, then key match, then port match, then Sonarr's instance name,
+then the only section if just one exists.
+
+Matching on the key rather than the port is deliberate. Two instances can share a
+port number in different containers, but not a key.
+
 ### Environment variable casing
 
 Sonarr passes its variables through a .NET `StringDictionary`, which lowercases
@@ -96,7 +117,7 @@ finish.
 
 ## The poller
 
-Two passes per instance.
+Three passes per instance.
 
 ### Pass 1, the queue
 
@@ -139,6 +160,51 @@ bin setting if you have one.
 
 A file covering several episodes appears once per episode in the scan, and is
 deduplicated by file id so it is only deleted once.
+
+### Pass 3, monitoring
+
+The one that matters. Passes 1 and 2 clean up; this one stops it happening.
+
+Sonarr will not search for an unmonitored episode. So the poller unmonitors
+every episode whose air time is still in the future, and re-monitors it once that
+time passes:
+
+```
+PUT /api/v3/episode/monitor   {"episodeIds": [...], "monitored": false}
+```
+
+The episode ids go into `sonarr-guard-state.json`, and only ids in that file are
+ever re-monitored. This is the difference from
+[swurApp](https://github.com/OwlCaribou/swurApp), which re-monitors every aired
+episode in the latest season and so cannot distinguish its own changes from the
+user's, needing an "ignore" tag as a workaround. Both mechanisms are supported
+here, but the bookkeeping means the tag is optional rather than load-bearing.
+
+The state file is written atomically, and re-read and merged immediately before
+writing, so a hook firing mid-run cannot lose an entry.
+
+`--restore-monitoring` re-monitors everything in the state file regardless of air
+date and empties it. Run it before uninstalling.
+
+### Why the queue removal always skips redownload
+
+Sonarr's **Redownload Failed** setting is on by default. Marking a release failed
+publishes a `DownloadFailedEvent`, and Sonarr responds by searching for a
+replacement immediately.
+
+For an unaired episode the replacement is simply the next fake. So a guard that
+blocklists without `skipRedownload=true` creates its own perpetual loop: grab,
+block, search, grab, at whatever rate the indexer can serve new release names.
+This was observed in practice at roughly one new fake every thirty to forty
+seconds.
+
+Every queue removal here therefore passes `skipRedownload=true`. We never want a
+replacement for an episode that has not aired.
+
+The file-deletion path has no equivalent flag, because
+`POST /api/v3/history/failed/{id}` takes only an id. It can still trigger one
+redownload, but that grab is caught by the On Grab hook and removed with
+`skipRedownload=true`, so the chain terminates after a single extra round.
 
 ### Blocklisting
 

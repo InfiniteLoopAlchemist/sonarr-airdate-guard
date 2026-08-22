@@ -239,16 +239,23 @@ if [ "${SONARR_GUARD_CRON:-1}" = "1" ]; then
     PY="$(command -v python3)"
     HOURLY="0 * * * * $PY $GUARD_DIR/sonarr-airdate-guard.py >/dev/null 2>&1"
     WEEKLY="30 4 * * 0 $PY $GUARD_DIR/sonarr-airdate-guard.py --files-only --scope imported_early >/dev/null 2>&1"
+    # After a reboot the hourly slot can be up to an hour away, and anything that
+    # aired while the box was down stays unmonitored until then. The sleep gives
+    # Docker and Sonarr time to finish starting first.
+    ATBOOT="@reboot sleep 180 && $PY $GUARD_DIR/sonarr-airdate-guard.py >/dev/null 2>&1"
 
     if [ "$DRY_RUN" = "1" ]; then
         info "would install: $HOURLY"
         info "would install: $WEEKLY"
+        info "would install: $ATBOOT"
     else
         current="$(crontab -l 2>/dev/null || true)"
         cleaned="$(printf '%s\n' "$current" | grep -v 'sonarr-airdate-guard.py' || true)"
-        printf '%s\n%s\n%s\n' "$cleaned" "$HOURLY" "$WEEKLY" | grep -v '^[[:space:]]*$' | crontab -
-        info "hourly: queue guard plus unaired file cleanup"
+        printf '%s\n%s\n%s\n%s\n' "$cleaned" "$HOURLY" "$WEEKLY" "$ATBOOT" \
+            | grep -v '^[[:space:]]*$' | crontab -
+        info "hourly: queue guard, unaired file cleanup, monitoring"
         info "weekly: deep imported-early sweep, Sundays 04:30"
+        info "at boot: one catch-up run three minutes after startup"
     fi
 else
     step "cron skipped (SONARR_GUARD_CRON=0)"

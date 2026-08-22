@@ -232,11 +232,49 @@ The installer sets up two cron entries:
 ```cron
 0 * * * *   python3 ~/sonarr-guard/sonarr-airdate-guard.py
 30 4 * * 0  python3 ~/sonarr-guard/sonarr-airdate-guard.py --files-only --scope imported_early
+@reboot     sleep 180 && python3 ~/sonarr-guard/sonarr-airdate-guard.py
 ```
 
 Hourly is the queue guard, the cheap unaired file check, and the monitoring
 pass. The weekly one is the deep library sweep, on its own schedule because it
-costs an API call per series.
+costs an API call per series. The `@reboot` entry is a catch-up run, because the
+hourly slot can be up to an hour after a restart; the sleep gives Docker and
+Sonarr time to finish starting.
+
+### What survives a host reboot
+
+All of it, and the protection does not depend on anything running.
+
+| Thing | Where it lives | Survives |
+| --- | --- | --- |
+| Unmonitored flags | Sonarr's own database | yes |
+| Custom Script connection | Sonarr's own database | yes |
+| `/guard` bind mount | the compose file | yes |
+| Scripts, config, state file | the guard directory on disk | yes |
+| Cron entries | the user crontab | yes |
+
+The important one is the first. What actually stops Sonarr grabbing an unaired
+episode is a `monitored = false` flag in its database, not a running process. If
+this tool never ran again, the episodes already unmonitored would stay protected.
+The cost of it not running is the opposite: episodes that have aired never get
+their monitoring back.
+
+Your containers need `restart: unless-stopped` (or `always`) in their compose
+files, and `docker` and `cron` need to be enabled at boot, which is the default
+on most distributions. Check with:
+
+```bash
+systemctl is-enabled docker cron
+docker inspect sonarr --format '{{.HostConfig.RestartPolicy.Name}}'
+```
+
+One thing worth checking that is nothing to do with this tool: if your media lives
+on a network mount, make sure its `/etc/fstab` entry has **`nofail`**. Without it a
+NAS that is slow or unreachable at boot can stall the boot into emergency mode.
+And if the mount is missing while Sonarr starts, Sonarr sees an empty library and
+may try to re-download a great deal of it. The guard will not make that worse, it
+keys off Sonarr's `hasFile`, which is false for everything in that state, so it
+deletes nothing.
 
 Skip cron entirely with `SONARR_GUARD_CRON=0 ./install.sh` if you prefer systemd
 timers.

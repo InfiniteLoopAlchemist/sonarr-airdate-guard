@@ -1,10 +1,22 @@
-# Draft feature request for Sonarr
+# Feature request for Sonarr: cleaning up early imports
 
-Not yet filed. See the note at the bottom before posting.
+Filed as [Sonarr#8896](https://github.com/Sonarr/Sonarr/issues/8896) and closed as
+`not_planned`. Kept here as a record of what was asked and what was decided.
 
-**Target:** https://github.com/Sonarr/Sonarr/issues/new?template=feature_request.yml
+**The decision**, from markus101:
 
-**Title:** Clean up episode files that were imported before their air date
+> This is better as an external script that uses the API to determine which
+> episodes should be cleaned up, instead of a feature built into Sonarr itself.
+>
+> No plans to add or support this functionality directly in Sonarr.
+
+That settles it: cleaning up early imports is out of scope for Sonarr, and this
+tool is the intended shape of the solution. The grab side still becomes native in
+v5 via `AirDateSpecification`; the cleanup and monitoring sides stay here.
+
+---
+
+## What was filed
 
 ---
 
@@ -113,16 +125,3 @@ passing `skipRedownload=true` produces a grab, block, search, grab loop. I
 measured a new fake roughly every 30 to 40 seconds on one instance until I passed
 that flag. `POST /api/v3/history/failed/{id}` has no equivalent parameter, which
 is worth knowing for anyone building on this.
-
----
-
-## Before posting
-
-The core ask, blocking unaired grabs, is **already implemented** on `v5-develop`
-and will arrive with Sonarr v5. Do not file a request for that; it will be closed
-as a duplicate of #969.
-
-This draft deliberately covers only the part v5 does not address: existing early
-imports. Be aware that Sonarr triages feature requests hard. #8521, a similarly
-narrow request, was closed the same day it was opened with `one-day-maybe`, so a
-similar outcome here is plausible.

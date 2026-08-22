@@ -30,8 +30,18 @@ favour of the v5 work.
 
 Even on v5, two things remain uncovered, and this tool handles both: files that
 were **already imported** before you turned the setting on, and the fact that
-Sonarr keeps the episode monitored and so keeps searching for it. See
-[the draft feature request](docs/sonarr-feature-request.md) for the first.
+Sonarr keeps the episode monitored and so keeps searching for it.
+
+Neither is coming to Sonarr. Asked directly in
+[#8896](https://github.com/Sonarr/Sonarr/issues/8896), the answer was:
+
+> This is better as an external script that uses the API to determine which
+> episodes should be cleaned up, instead of a feature built into Sonarr itself.
+> No plans to add or support this functionality directly in Sonarr.
+>
+> — markus101, Sonarr maintainer
+
+So this is the intended shape of the fix, not a stopgap waiting to be obsoleted.
 
 Two shapes this takes in practice:
 

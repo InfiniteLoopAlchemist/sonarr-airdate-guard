@@ -14,12 +14,24 @@ still weeks away and grabs it. You end up with a library full of files for
 episodes that do not exist yet, and Sonarr thinks those episodes are done, so it
 never grabs the real ones.
 
-Sonarr has no built-in option to refuse unaired episodes. It has been requested
-repeatedly ([#969](https://github.com/Sonarr/Sonarr/issues/969),
-[#5312](https://github.com/Sonarr/Sonarr/issues/5312),
-[forum](https://forums.sonarr.tv/t/reject-unaired-episodes/39115)) and is still
-not there. Delay profiles do not help: they delay on file age, not air date, so a
-file that appeared a week before air is grabbed as soon as the delay elapses.
+**Sonarr v5 will fix half of this natively.**
+[#969](https://github.com/Sonarr/Sonarr/issues/969) was closed as completed in
+February 2026, and `v5-develop` carries an `AirDateSpecification` driven by three
+new release profile fields, `AirDateRestriction`, `AirDateGracePeriod`, and
+`AllowSeasonPackWithoutAllEpisodesAired`. If you are running v5, use that for the
+grab side rather than this.
+
+On Sonarr v4, which is the only stable line at the time of writing, there is
+nothing. Delay profiles do not help: they key on file age, not air date, so a file
+that appeared a week before air is grabbed as soon as the delay elapses. Earlier
+requests ([#5312](https://github.com/Sonarr/Sonarr/issues/5312),
+[forum](https://forums.sonarr.tv/t/reject-unaired-episodes/39115)) were closed in
+favour of the v5 work.
+
+Even on v5, two things remain uncovered, and this tool handles both: files that
+were **already imported** before you turned the setting on, and the fact that
+Sonarr keeps the episode monitored and so keeps searching for it. See
+[the draft feature request](docs/sonarr-feature-request.md) for the first.
 
 Two shapes this takes in practice:
 

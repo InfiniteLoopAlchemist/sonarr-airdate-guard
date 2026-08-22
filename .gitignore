@@ -1,0 +1,19 @@
+# The live config holds one API key per instance. Never commit it.
+sonarr-guard.conf
+sonarr-guard.conf.new
+
+# Runtime
+sonarr-guard.log
+*.log
+
+# Compose backups the installer leaves behind
+*.bak
+*.bak.*
+*.guardtmp
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store

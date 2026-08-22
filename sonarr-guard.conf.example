@@ -1,0 +1,78 @@
+# Sonarr air-date guard, one config for every instance.
+#
+# install.sh copies this file to <guard dir>/sonarr-guard.conf and appends one
+# section per Sonarr container it finds, filling in url and api_key from that
+# container's own config.xml. Edit the values below to taste; the installer
+# never overwrites an existing config.
+#
+# The section name is what goes in the "Arguments" field of that instance's
+# Custom Script connection, and what you pass to the poller with -i.
+#
+# url and api_key are used by the HOST-side poller only. The in-container hook
+# reads its own /config/config.xml instead, so regenerating a key in the Sonarr
+# UI can never desync the hook.
+
+[DEFAULT]
+
+# --- grab guard (the download queue) ---------------------------------------
+
+# How long after an episode's UTC air time a release stops being suspicious.
+# Anything grabbed before air time + grace_days is pulled from the queue and
+# blocklisted.
+grace_days = 3
+
+# How to judge a release that covers more than one episode.
+#   strict   reject if ANY episode in the release is still early. Recommended.
+#   lenient  reject only if EVERY episode is still early, which lets a partial
+#            season pack through as long as its first episode has aired.
+mode = strict
+
+# Set to false to leave one instance alone without deleting its section.
+enabled = true
+
+# --- file cleanup (what is already on disk) --------------------------------
+
+# Delete episode files that were imported before the episode aired.
+delete_early_files = true
+
+# What counts as deletable.
+#
+#   unaired         the episode has not aired yet, so the file cannot be real.
+#                   One calendar call per instance, cheap enough to run hourly.
+#
+#   imported_early  everything above, plus files whose import timestamp predates
+#                   the episode's air time by more than early_import_margin_hours,
+#                   even if the episode has since aired. This is the "that fake
+#                   is still sitting in my library months later" sweep. It costs
+#                   one API call per series, so give it its own schedule rather
+#                   than running it every hour.
+delete_scope = unaired
+
+# After deleting a file, mark the grab that produced it as failed so Sonarr
+# blocklists that release instead of immediately grabbing it again.
+delete_blocklist = true
+
+# imported_early only. How far ahead of air time an import is still allowed to
+# be. Some web releases legitimately land a few hours early in some regions.
+early_import_margin_hours = 24
+
+# unaired only. How far into the future to scan the calendar for early imports.
+future_window_days = 400
+
+
+# ---------------------------------------------------------------------------
+# One section per instance. install.sh appends these for you.
+#
+# Anything set here overrides [DEFAULT] for that instance only.
+#
+# [main]
+# url = http://127.0.0.1:8989
+# api_key = ...
+#
+# [anime]
+# url = http://127.0.0.1:9779
+# api_key = ...
+# # Anime metadata dates are less reliable and absolute numbering is common,
+# # so a longer grace period and a partial-pack allowance are safer here.
+# grace_days = 5
+# mode = lenient

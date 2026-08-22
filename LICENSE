@@ -1,0 +1,20 @@
+Copyright (c) 2026 Infinite Loop Alchemist
+
+All rights reserved.
+
+This software and its source code are made publicly viewable for reference and
+personal use. No licence is granted to redistribute, sublicense, sell, or publish
+this software or derivative works based on it, in whole or in part, without prior
+written permission from the copyright holder.
+
+You may run this software on systems you control, and you may modify it for your
+own use on those systems.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+This software deletes media files. Run it with --dry-run first.

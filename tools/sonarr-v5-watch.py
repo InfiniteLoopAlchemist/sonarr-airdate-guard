@@ -6,8 +6,9 @@ and, ONLY when v5 actually appears, creates an Apple Reminder (the ping)
 and an Apple Note (the detail). Silent while there is still no v5. First
 run seeds state silently.
 
-Installed as a launchd agent (see install-sonarr-v5-watch.sh); state lives
-at ~/Library/Application Support/sonarr-v5-watch/.
+Installed as a launchd agent by install-sonarr-v5-watch.sh, which runs a
+deployed copy under ~/.local/share (launchd cannot read ~/Documents), so
+re-run the installer after editing this file; state lives at ~/Library/Application Support/sonarr-v5-watch/.
 
 Why v5 matters: it adds AirDateSpecification, driven by the release-profile
 fields AirDateRestriction / AirDateGracePeriod /
